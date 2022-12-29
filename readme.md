@@ -15,7 +15,7 @@ See [Releases](https://github.com/Rinloid/musk_rose_rd/releases)
 
 ## Installations
 
-* [Windows](https://youtu.be/qe7m0YRGHs8?t=279)
+* [Windows](https://youtu.be/2HbDrs2LZ58)
 * [Android](https://youtu.be/MYlnjqnFBgw)
 
-Thanks to [Elsa](https://twitter.com/intent/user?user_id=1427458538754871296) and [ENDERMANYK](https://twitter.com/intent/user?user_id=974631821223890945) for the tutorials.
+Thanks to [ENDERMANYK](https://twitter.com/intent/user?user_id=974631821223890945) for the tutorial.
