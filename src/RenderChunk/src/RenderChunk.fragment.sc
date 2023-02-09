@@ -527,13 +527,13 @@ if (waterFlag > 0.5 || isMetallic) {
 }
 
 float fogBrightness = mix(0.7, 2.0, smoothstep(0.0, 0.1, daylight));
-vec3 fogCol = toneMapReinhard(getAtmosphere(skyPos, sunMoonPos, SKY_COL, fogBrightness));
+vec3 fogCol = toneMapReinhard(getAtmosphere(skyPos, sunMoonPos, SKY_COL, fogBrightness)) * mix(vec3(1.0, 1.0, 1.0), v_fog.rgb, step(fogControl.x, 0.0));
 
 albedo.rgb = mix(albedo.rgb, mix(fogCol, vec3(dot(fogCol, vec3(0.4, 0.4, 0.4)), dot(fogCol, vec3(0.4, 0.4, 0.4)), dot(fogCol, vec3(0.4, 0.4, 0.4))), 1.0 - clearWeather), v_fog.a);
 
 #if !defined(TRANSPARENT)
 	if (!isMetallic) {
-		float sunRayFactor = !bool(step(fogControl.x, 0.0)) ? min(smoothstep(0.5, 0.94, v_lightmapUV.y) * max(0.0, 1.0 - distance(skyPos, sunMoonPos)) * smoothstep(0.0, 0.1, daylight), 1.0) : 0.0;
+		float sunRayFactor = !bool(step(fogControl.x, 0.0)) ? min(smoothstep(0.5, 0.94, v_lightmapUV.y) * max(0.0, 1.0 - distance(skyPos, sunMoonPos)) * smoothstep(0.0, 0.1, daylight), 1.0) * clearWeather : 0.0;
 		albedo.rgb = mix(albedo.rgb, RAY_COL, sunRayFactor);
 	}
 #endif
