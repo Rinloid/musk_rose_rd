@@ -12,11 +12,11 @@ uniform vec4 FogColor;
 
 bool isPlant(vec4 vertexCol, vec4 pos) {
     vec3 fractPos = fract(pos.xyz);
-    #if defined(ALPHA_TEST)
+#   if defined(ALPHA_TEST)
         return (vertexCol.g != vertexCol.b && vertexCol.r < vertexCol.g + vertexCol.b) || (fractPos.y == 0.9375 && (fractPos.z == 0.0 || fractPos.x == 0.0));
-    #else
+#   else
         return false;
-    #endif
+#   endif
 }
 
 void main() {
@@ -53,9 +53,6 @@ fogColor.rgb = FogColor.rgb;
 fogColor.a = clamp(((camDis / FogAndDistanceControl.z - FogAndDistanceControl.x) / (FogAndDistanceControl.y - FogAndDistanceControl.x)), 0.0, 1.0);
 
 #ifdef TRANSPARENT
-    if (a_color0.a < 0.95) {
-        color.a = mix(a_color0.a, 1.0, clamp((camDis / FogAndDistanceControl.w), 0.0, 1.0));
-    }
     if (a_color0.r != a_color0.g || a_color0.g != a_color0.b || a_color0.r != a_color0.b) {
         waterFlag = 1.0;
     }

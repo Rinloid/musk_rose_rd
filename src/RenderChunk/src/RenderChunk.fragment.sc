@@ -6,77 +6,7 @@ SAMPLER2D(s_MatTexture, 0);
 SAMPLER2D(s_LightMapTexture, 1);
 SAMPLER2D(s_SeasonsTexture, 2);
 
-vec3 hdrExposure(const vec3 col, const float overExposure, const float underExposure) {
-    vec3 overExposed   = col / overExposure;
-    vec3 normalExposed = col;
-    vec3 underExposed  = col * underExposure;
-
-    return mix(overExposed, underExposed, normalExposed);
-}
-
-/*
- ** Uncharted 2 tone mapping
- ** Link (deleted): http://filmicworlds.com/blog/filmic-tonemapping-operators/
- ** Archive: https://bit.ly/3NSGy4r
- */
-vec3 uncharted2ToneMap_(vec3 x) {
-    const float A = 0.015; // Shoulder strength
-    const float B = 0.500; // Linear strength
-    const float C = 0.100; // Linear angle
-    const float D = 0.010; // Toe strength
-    const float E = 0.020; // Toe numerator
-    const float F = 0.300; // Toe denominator
-
-    return ((x * (A * x + C * B) + D * E) / (x * (A * x + B) + D * F)) - E / F;
-}
-vec3 uncharted2ToneMap(const vec3 col, const float exposureBias) {
-    const float whiteLevel = 256.0;
-
-    vec3 curr = uncharted2ToneMap_(exposureBias * col);
-    vec3 whiteScale = 1.0 / uncharted2ToneMap_(vec3(whiteLevel, whiteLevel, whiteLevel));
-    vec3 color = curr * whiteScale;
-
-    return clamp(color, 0.0, 1.0);
-}
-
-vec3 contrastFilter(const vec3 col, const float contrast) {
-    return (col - 0.5) * max(contrast, 0.0) + 0.5;
-}
-
-/*
- ** Atmoshpere based on one by robobo1221.
- ** See: https://www.shadertoy.com/view/Ml2cWG
-*/
-vec3 getAbsorption(const vec3 pos, const float posY, const float brightness) {
-	vec3 absorption = pos * -posY;
-	absorption = exp2(absorption) * brightness;
-	
-	return absorption;
-}
-float getRayleig(const vec3 pos, const vec3 sunPos) {
-    float dist = 1.0 - clamp(distance(pos, sunPos), 0.0, 1.0);
-
-	return 1.0 + dist * dist * 3.14;
-}
-float getMie(const vec3 pos, const vec3 sunPos) {
-	float disk = clamp(1.0 - pow(distance(pos, sunPos), 0.1), 0.0, 1.0);
-	
-	return disk * disk * (3.0 - 2.0 * disk) * 2.0 * 3.14;
-}
-vec3 getAtmosphere(const vec3 pos, const vec3 sunPos, const vec3 skyCol, const float brightness) {
-	float zenith = 0.5 / sqrt(max(pos.y, 0.05));
-	
-	vec3 absorption = getAbsorption(skyCol, zenith, brightness);
-    vec3 sunAbsorption = getAbsorption(skyCol, 0.5 / pow(max(sunPos.y, 0.05), 0.75), brightness);
-	vec3 sky = skyCol * zenith * getRayleig(pos, sunPos);
-	vec3 mie = getMie(pos, sunPos) * sunAbsorption;
-	
-	vec3 result = mix(sky * absorption, sky / (sky + 0.5), clamp(length(max(sunPos.y, 0.0)), 0.0, 1.0));
-    result += mie;
-	result *= sunAbsorption * 0.5 + 0.5 * length(sunAbsorption);
-	
-	return result;
-}
+#define ENABLE_SHADER_SKY
 
 /** Hash from "Hahs without Sine"
  ** Author: David Hoskins
@@ -187,194 +117,38 @@ vec2 hash22(vec2 p) {
     }
 #endif
 
-float fBM(vec2 x, const float amp, const float lower, const float upper, const float time, const int octaves) {
-    float v = 0.0;
-    float amptitude = amp;
+#define ENABLE_WAVES
+float getWaterWaves(const vec2 pos, const float time) {
+	float waves = 0.0;
+	#ifdef ENABLE_WAVES
+		vec2 p = pos * 0.5;
 
-    x += time * 0.01;
+        waves += simplexNoise(vec2(p.x * 1.4 - time * 0.4, p.y + time * 0.4) * 0.6) * 4.0;
+        waves += simplexNoise(vec2(p.x * 1.4 - time * 0.3, p.y + time * 0.2) * 1.2) * 1.2;
+        waves += simplexNoise(vec2(p.x * 2.2 - time * 0.3, p.y * 2.8 - time * 0.6)) * 0.4;
 
-    for (int i = 0; i < octaves; i++) {
-        v += amptitude * (simplexNoise(x) * 0.5 + 0.5);
+	#endif
 
-        /* Optimization */
-        if (v >= upper) {
-            break;
-        } else if (v + amptitude <= lower) {
-            break;
-        }
-
-        x         *= 2.0;
-        x.y       -= float(i + 1) * time * 0.025;
-        amptitude *= 0.5;
-    }
-
-	return smoothstep(lower, upper, v);
+	return waves * 0.004;
 }
 
-float cloudMap(const vec2 pos, const float time, const float amp, const float rain, const int oct) {
-    return fBM(pos, 0.65 - abs(amp) * 0.1, mix(0.8, 0.0, rain), 0.9, time, oct);
-}
-
-float cloudMapShade(const vec2 pos, const float time, const float amp, const float rain, const int oct) {
-    return fBM(pos * 0.995, 0.64 - abs(amp) * 0.1, mix(0.8, 0.0, rain), 0.9, time, oct);
-}
-
-#define ENABLE_CLOUDS
-#define ENABLE_CLOUD_SHADING
-
-/*
- ** Generate volumetric clouds with piled 2D noise.
-*/
-vec2 renderClouds(const vec3 pos, const vec3 sunPos, const float brightness, const float rain, const float time) {
-    const float stepSize = 0.048;
-    const int cloudSteps = 5;
-    const int cloudOctaves = 5;
-    const int raySteps = 1;
-    const float rayStepSize = 0.2;
-    
-    float clouds = 0.0;
-    float shade = 0.0;
-    float amp = -0.5;
-
-    #ifdef ENABLE_CLOUDS
-        float drawSpace = max(0.0, length(pos.xz / (pos.y * float(10))));
-        if (drawSpace < 1.0 && !bool(step(pos.y, 0.0))) {
-            for (int i = 0; i < cloudSteps; i++) {
-                float height = 1.0 + float(i) * stepSize;
-                vec2 cloudPos = pos.xz / pos.y * height;
-                cloudPos *= 0.3 + hash13(floor(pos * 2048.0)) * 0.01;
-
-                clouds = mix(clouds, 1.0, cloudMap(cloudPos, time, amp, rain, cloudOctaves));
-
-                #ifdef ENABLE_CLOUD_SHADING
-                    /* 
-                    ** Compute self-casting shadows of clouds with
-                    * a (sort of) volumetric ray marching!
-                    */
-                    vec3 rayStep = normalize(sunPos - pos) * rayStepSize;
-                    vec3 rayPos = pos;
-                    for (int i = 0; i < raySteps; i++) {
-                        rayPos += rayStep;
-                        float rayHeight = cloudMapShade(cloudPos, time, amp, rain, cloudOctaves);
-                        
-                        shade += mix(0.0, 1.0, max(0.0, rayHeight - (rayPos.y - pos.y)));
-                    }
-
-                #endif
-                amp += 1.0 / float(cloudSteps);
-
-            } shade /= float(cloudSteps);
-        }
-
-        clouds = mix(clouds, 0.0, drawSpace);
-#   endif
-
-    return vec2(clouds, shade);
-}
-
-vec3 getAtmosphereClouds(const vec3 pos, const vec3 sunPos, const vec3 skyCol, const float rain, const float brightness, const float daylight, const float time) {
-	float zenith = 0.5 / sqrt(max(pos.y, 0.05));
-	
-	vec3 absorption = getAbsorption(skyCol, zenith, brightness);
-    vec3 sunAbsorption = getAbsorption(skyCol, 0.5 / pow(max(sunPos.y, 0.05), 0.75), brightness);
-	vec3 sky = skyCol * zenith * getRayleig(pos, sunPos);
-	vec2 clouds = renderClouds(pos, sunPos, daylight, rain, time);
-
-	vec3 mie = getMie(pos, sunPos) * sunAbsorption;
-	
-	vec3 result = mix(sky * absorption, sky / (sky + 0.5), clamp(length(max(sunPos.y, 0.0)), 0.0, 1.0));
-	
-	float cloudBrightness = clamp(dot(result, vec3(0.4, 0.4, 0.4)), 0.0, 1.0);
-	vec3 cloudCol = mix(result, vec3(1.0, 1.0, 1.0), cloudBrightness);
-	cloudCol = mix(cloudCol, vec3(dot(cloudCol, vec3(0.4, 0.4, 0.4)), dot(cloudCol, vec3(0.4, 0.4, 0.4)), dot(cloudCol, vec3(0.4, 0.4, 0.4))), 0.5);
-	
-	result = mix(result, mix(cloudCol, cloudCol * 0.6, clouds.y), 1.0 / absorption * clouds.x * 0.8);
-	
-    result += mie;
-	result *= sunAbsorption * 0.5 + 0.5 * length(sunAbsorption);
-	
-	return result;
-}
-
-float getStars(const vec3 pos) {
-    vec3 p = floor((normalize(pos) + 16.0) * 265.0);
-    float stars = smoothstep(0.998, 1.0, hash13(p));
-
-    return stars;
-}
-
-float getSun(const vec3 pos) {
-	return 1.0 / length(pos);
-}
-
-vec3 toneMapReinhard(const vec3 color) {
-	vec3 col = color * color;
-    float luma = dot(col, vec3(0.4, 0.4, 0.4));
-    vec3 exposure = col / (col + 1.0);
-	vec3 result = mix(col / (luma + 1.0), exposure, exposure);
-
-    return result;
-}
-
-vec3 getSky(const vec3 pos, const vec3 sunPos, const vec3 moonPos, const vec3 skyCol, const float daylight, const float rain, const float time, const int moonPhase) {
-	vec3 sky = getAtmosphereClouds(pos, sunPos, skyCol, rain, mix(0.7, 2.0, smoothstep(0.0, 0.1, daylight)), daylight, time);
-	sky = toneMapReinhard(sky);
-	sky += mix(vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0), getSun(cross(pos, sunPos) * 127.0));
-	sky = mix(sky, vec3(1.0, 0.96, 0.82), getStars(pos) * smoothstep(0.4, 0.0, daylight));
-
-	sky = mix(sky, vec3(dot(sky, vec3(0.4, 0.4, 0.4)), dot(sky, vec3(0.4, 0.4, 0.4)), dot(sky, vec3(0.4, 0.4, 0.4))), rain);
-	
-	return sky;
-}
-
-
-vec3 getSkyLight(const vec3 pos, const vec3 sunPos, const vec3 skyCol, const float daylight, const float rain) {
-	vec3 sky = getAtmosphere(pos, sunPos, skyCol, mix(0.7, 2.0, smoothstep(0.0, 0.1, daylight)));
-	sky = toneMapReinhard(sky);
-
-	sky = mix(sky, vec3(dot(sky, vec3(0.4, 0.4, 0.4)), dot(sky, vec3(0.4, 0.4, 0.4)), dot(sky, vec3(0.4, 0.4, 0.4))), rain);
-
-	return sky;
-}
-
-#define ENABLE_WATER_WAVES
-
-/*
- ** Generate water waves with simplex noises.
-*/
-float getWaterWav(const vec2 pos, const float time) {
-	float wav = 0.0;
-    #ifdef ENABLE_WATER_WAVES
-        vec2 p = pos * 0.5;
-
-        wav += simplexNoise(vec2(p.x * 1.4 - time * 0.4, p.y + time * 0.4) * 0.6) * 4.0;
-        wav += simplexNoise(vec2(p.x * 1.4 - time * 0.3, p.y + time * 0.2) * 1.2) * 1.2;
-        wav += simplexNoise(vec2(p.x * 2.2 - time * 0.3, p.y * 2.8 - time * 0.6)) * 0.4;
-    #endif
-
-    return wav * 0.004;
-}
-
-/*
- ** Generate a normal map of water waves.
-*/
-vec3 getWaterWavNormal(const vec2 pos, const float time) {
+vec3 getWaterWaveNormal(const vec2 pos, const float time) {
 	const float texStep = 0.04;
     
-	float height = getWaterWav(pos, time);
-	vec2 delta = vec2(height, height);
+	float height = getWaterWaves(pos, time);
+	vec2  delta  = vec2(height, height);
 
-    delta.x -= getWaterWav(pos + vec2(texStep, 0.0), time);
-    delta.y -= getWaterWav(pos + vec2(0.0, texStep), time);
+    delta.x -= getWaterWaves(pos + vec2(texStep, 0.0), time);
+    delta.y -= getWaterWaves(pos + vec2(0.0, texStep), time);
     
 	return normalize(vec3(delta / texStep, 1.0));
 }
 
-vec3 getTexNormal(vec2 uv, float resolution, float scale) {
+vec3 getTexNormal(const vec2 uv, const float resolution, const float scale) {
     vec2 texStep = 1.0 / resolution * vec2(2.0, 1.0);
-    float height = dot(texture2DLod(s_MatTexture, uv, 0.0).rgb, vec3(0.4, 0.4, 0.4));
-    vec2 dxy = height - vec2(dot(texture2DLod(s_MatTexture, uv + vec2(texStep.x, 0.0), 0.0).rgb, vec3(0.4, 0.4, 0.4)),
-        dot(texture2DLod(s_MatTexture, uv + vec2(0.0, texStep.y), 0.0).rgb, vec3(0.4, 0.4, 0.4)));
+    float height = dot(texture2DLod(s_MatTexture, uv, 0.0).rgb, vec3(0.22, 0.707, 0.0714));
+    vec2 dxy = height - vec2(dot(texture2DLod(s_MatTexture, uv + vec2(texStep.x, 0.0), 0.0).rgb, vec3(0.22, 0.707, 0.071)),
+        dot(texture2DLod(s_MatTexture, uv + vec2(0.0, texStep.y), 0.0).rgb, vec3(0.22, 0.707, 0.071)));
 
 	return normalize(vec3(dxy * scale / texStep, 1.0));
 }
@@ -387,7 +161,7 @@ mat3 getTBNMatrix(const vec3 normal) {
     return mat3(T, B, N);
 }
 
-int alpha2BlockID(const vec4 texCol) {
+int getBlockID(const vec4 texCol) {
     bool iron   = 0.99 <= texCol.a && texCol.a < 1.00;
     bool gold   = 0.98 <= texCol.a && texCol.a < 0.99;
     bool copper = 0.97 <= texCol.a && texCol.a < 0.98;
@@ -396,35 +170,399 @@ int alpha2BlockID(const vec4 texCol) {
     return iron ? 0 : gold ? 1 : copper ? 2 : other ? 3 : 4;
 }
 
-/*
- * All codes below are from Origin Shader by linlin.
- * Huge thanks to their great effort.  See:
- * https://github.com/origin0110/OriginShader
-*/
-
 float getTimeFromFog(const vec4 fogCol) {
 	return fogCol.g > 0.213101 ? 1.0 : 
 		dot(vec4(fogCol.g * fogCol.g * fogCol.g, fogCol.g * fogCol.g, fogCol.g, 1.0), 
 			vec4(349.305545, -159.858192, 30.557216, -1.628452));
 }
 
-#define SKY_COL vec3(0.4, 0.65, 1.0)
-#define RAY_COL vec3(0.63, 0.62, 0.45)
+#define RAIN_CUTOFF 0.3
 
-#define AMBIENT_LIGHT_INTENSITY 10.0
-#define SKYLIGHT_INTENSITY 30.0
-#define SUNLIGHT_INTENSITY 30.0
-#define MOONLIGHT_INTENSITY 10.0
-#define TORCHLIGHT_INTENSITY 60.0
+#define torchlightCol vec3(1.00, 0.66, 0.28)
+#define moonlightCol vec3(0.20, 0.40, 1.00)
 
-#define SKYLIGHT_COL vec3(0.9, 0.98, 1.0)
-#define SUNLIGHT_COL vec3(1.0, 0.9, 0.85)
-#define SUNLIGHT_COL_SET vec3(1.0, 0.70, 0.1)
-#define TORCHLIGHT_COL vec3(1.0, 0.65, 0.3)
-#define MOONLIGHT_COL vec3(0.2, 0.4, 1.0)
+float getBlockyClouds(const vec2 pos, const float time, const float rainLevel) {
+    vec2 p = pos * 0.5;
+    p += time * 0.02;
+    float body = hash12(floor(p));
+    body = body > mix(0.7, 0.0, rainLevel) ? 1.0 : 0.0;
 
-#define EXPOSURE_BIAS 5.0
-#define GAMMA 2.3
+    return body;
+}
+
+vec3 getClouds(const vec3 pos, const vec3 lightPos, const float time, const float rainLevel) {
+    const int cloudSteps = 8;
+    const float cloudStepSize = 0.024;
+    const int raySteps = 6;
+    const float rayStepSize = 0.32;
+    const float cloudHeight = 256.0;
+
+    float clouds = 0.0;
+    float shade  = 0.0;
+    float highlight = 0.0;
+
+    float amp = 0.5;
+
+    float drawSpace = max(0.0, length(pos.xz / (pos.y * float(8))));
+    if (drawSpace < 1.0 && !bool(step(pos.y, 0.0))) {
+        for (int i = 0; i < cloudSteps; i++) {
+            float height = 1.0 + float(i) * cloudStepSize;
+            vec3 p = pos.xyz / pos.y * height;
+            clouds += getBlockyClouds(p.xz * 2.0, time, rainLevel);
+
+            if (clouds > 0.0) {
+                vec3 rayPos = pos.xyz / pos.y * height;
+                float ray = 0.0;
+                for (int j = 0; j < raySteps; j++) {
+                    ray += getBlockyClouds(rayPos.xz * 2.0, time, rainLevel) * 0.6;
+                    rayPos += lightPos * rayStepSize;
+                } ray /= float(raySteps);
+                shade += ray;
+                highlight += ray * ray * ray * ray * ray * ray;
+            }
+            amp -= 0.2 / float(cloudSteps);
+        } clouds /= float(cloudSteps);
+          shade /= float(cloudSteps);
+          highlight /= float(cloudSteps);
+
+        clouds = mix(clouds, 0.0, drawSpace);
+    }
+
+    return vec3(clouds, shade, 1.0 - highlight);
+}
+
+/*
+ ** Atmoshpere based on one by robobo1221.
+ ** See: https://www.shadertoy.com/view/Ml2cWG
+*/
+vec3 getAbsorption(const vec3 pos, const float posY, const float brightness) {
+	vec3 absorption = pos * -posY;
+	absorption = exp2(absorption) * brightness;
+	
+	return absorption;
+}
+float getSunPoint(const vec3 pos, const vec3 sunPos, const float rainLevel) {
+	return smoothstep(0.1, 0.0, distance(pos, sunPos)) * 5.0 * (1.0 - rainLevel);
+}
+float getRayleig(const vec3 pos, const vec3 sunPos) {
+    float dist = 1.0 - clamp(distance(pos, sunPos), 0.0, 1.0);
+
+	return 1.0 + dist * dist * 3.14;
+}
+float getMie(const vec3 pos, const vec3 sunPos) {
+	float disk = clamp(1.0 - pow(distance(pos, sunPos), 0.1), 0.0, 1.0);
+	
+	return disk * disk * (3.0 - 2.0 * disk) * 2.0 * 3.14;
+}
+vec3 getAtmosphere(const vec3 pos, const vec3 sunPos, const vec3 skyCol, const vec3 vanillaSkyCol, const vec3 vanillaFogCol, const float brightness) {
+	vec3 result = mix(vanillaSkyCol, vanillaFogCol, smoothstep(0.8, 1.0, 1.0 - pos.y));
+	#ifdef ENABLE_SHADER_SKY
+		float zenith = 0.5 / sqrt(max(pos.y, 0.05));
+		
+		vec3 absorption = getAbsorption(skyCol, zenith, brightness);
+		vec3 sunAbsorption = getAbsorption(skyCol, 1.0 / pow(max(sunPos.y, 0.05), 0.75), brightness);
+		vec3 sky = skyCol * zenith * getRayleig(pos, sunPos);
+		vec3 mie = getMie(pos, sunPos) * sunAbsorption;
+		
+		result = mix(sky * absorption, sky / (sky + 0.5), clamp(length(max(sunPos.y, 0.0)), 0.0, 1.0));
+		result += mie;
+		result *= sunAbsorption * 0.5 + 0.5 * length(sunAbsorption);
+	#endif
+
+	return result;
+}
+
+vec3 getAtmosphereClouds(const vec3 pos, const vec3 sunPos, const vec3 skyCol, const vec3 vanillaSkyCol, const vec3 vanillaFogCol, const float brightness, const float daylight, const float rainLevel, const float time) {
+	vec3 result = mix(vanillaSkyCol, vanillaFogCol, smoothstep(0.8, 1.0, 1.0 - pos.y));
+	#ifdef ENABLE_SHADER_SKY
+		const float cloudDensity = 1.50; // [0.00 0.10 0.20 0.30 0.40 0.50 0.60 0.70 0.80 0.90 1.00 1.10 1.20 1.30 1.40 1.50 1.60 1.70 1.80 1.90 2.00 2.10 2.20 2.30 2.40 2.50 2.60 2.70 2.80 2.90 3.00 3.10 3.20 3.30 3.40 3.50 3.60 3.70 3.80 3.90 4.00 4.10 4.20 4.30 4.40 4.50 4.60 4.70 4.80 4.90 5.00 5.10 5.20 5.30 5.40 5.50 5.60 5.70 5.80 5.90 6.00 6.10 6.20 6.30 6.40 6.50 6.60 6.70 6.80 6.90 7.00 7.10 7.20 7.30 7.40 7.50 7.60 7.70 7.80 7.90 8.00 8.10 8.20 8.30 8.40 8.50 8.60 8.70 8.80 8.90 9.00 9.10 9.20 9.30 9.40 9.50 9.60 9.70 9.80 9.90 10.00]
+		
+		float zenith = 0.5 / sqrt(max(pos.y, 0.05));
+		
+		vec3 absorption = getAbsorption(skyCol, zenith, brightness);
+		vec3 sunAbsorption = getAbsorption(skyCol, 1.0 / pow(max(sunPos.y, 0.05), 0.75), brightness);
+		vec3 sky = skyCol * zenith * getRayleig(pos, sunPos);
+		vec3 sun = getSunPoint(pos, sunPos, rainLevel) * absorption;
+		vec3 clouds = getClouds(pos, sunPos, time, rainLevel);
+
+		vec3 mie = getMie(pos, sunPos) * sunAbsorption;
+		
+		result = mix(sky * absorption, sky / (sky + 0.5), clamp(length(max(sunPos.y, 0.0)), 0.0, 1.0));
+		
+		float cloudBrightness = clamp(dot(result, vec3(0.22, 0.707, 0.071)), 0.0, 1.0);
+		vec3 cloudCol = mix(result, vec3(1.0, 1.0, 1.0), cloudBrightness);
+		cloudCol = mix(cloudCol, vec3(dot(cloudCol, vec3(0.22, 0.707, 0.071)), dot(cloudCol, vec3(0.22, 0.707, 0.071)), dot(cloudCol, vec3(0.22, 0.707, 0.071))), 0.4);
+		
+		result = sun + mix(result, mix(cloudCol * mix(1.0, 1.5, clouds.z), cloudCol * mix(0.0, 0.65, daylight), clouds.y), 1.0 / absorption * clouds.x * cloudDensity);
+		
+		result += mie;
+		result *= sunAbsorption * 0.5 + 0.5 * length(sunAbsorption);
+	#endif
+
+	return result;
+}
+
+float getLuma(const vec3 col) {
+	return dot(col, vec3(0.22, 0.707, 0.071));
+}
+
+vec3 toneMapReinhard(const vec3 color) {
+	vec3 col = color * color;
+    float luma = getLuma(col);
+    vec3 exposure = col / (col + 1.0);
+	vec3 result = mix(col / (luma + 1.0), exposure, exposure);
+
+    return result;
+}
+
+float getStars(const vec3 pos, const float time) {
+    vec3 p = floor((pos + time * 0.001) * 265.0);
+    float stars = smoothstep(0.998, 1.0, hash13(p));
+
+    return stars;
+}
+
+float getMoonPhase(const int phase) {
+	/*
+	 ** moonPhase variable: [0, 1, 2, 3, 4, 5, 6, 7]
+	 ** Moon in MC:         [4, 5, 6, 7, 0, 1, 2, 3]
+	 ** 0 = new moon; 7 = full moon.
+	*/
+	int correctedPhase = 0 <= phase && phase < 5 ? phase + 4 : phase;
+
+	// [0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75]
+	return float(correctedPhase) * 0.25 * 3.14159265359;
+}
+
+float diffuseSphere(const vec3 spherePos, const float radius, const vec3 lightPos) {
+    float sq = radius * radius - spherePos.x * spherePos.x - spherePos.y * spherePos.y - spherePos.z * spherePos.z;
+
+    if (sq < 0.0) {
+        return 0.0;
+    } else {
+        float z = sqrt(sq);
+        vec3 normal = normalize(vec3(spherePos.yx, z));
+		
+        return max(0.0, dot(normal, lightPos));
+    }
+}
+
+vec4 getMoon(const vec3 moonPosition, const float moonPhase, const float moonScale) {
+	vec3 lightPos = vec3(sin(moonPhase), 0.0, -cos(moonPhase));
+    float m = diffuseSphere(moonPosition, moonScale, lightPos);
+	float moonTex = mix(1.0, 0.85, clamp(simplexNoise(moonPosition.xz * 0.2), 0.0, 1.0));
+	m = smoothstep(0.0, 0.3, m) * moonTex;
+    
+	return vec4(mix(vec3(0.1, 0.05, 0.01), vec3(1.0, 0.95, 0.81), m), diffuseSphere(moonPosition, moonScale, vec3(0.0, 0.0, 1.0)));
+}
+
+vec3 getSky(const vec3 pos, const vec3 sunPos, const vec3 skyCol, const vec3 vanillaSkyCol, const vec3 vanillaFogCol, const float daylight, const float rainLevel, const float time, const int moonPhase) {
+	vec3 sky = getAtmosphereClouds(pos, sunPos, skyCol, vanillaSkyCol, vanillaFogCol, mix(0.5, 2.0, smoothstep(0.0, 0.1, daylight)), daylight, rainLevel, time);
+	vec4 moon = getMoon(cross(pos, -sunPos) * 127.0, getMoonPhase(moonPhase), 7.0);
+	moon.a = mix(moon.a, 0.0, rainLevel);
+
+	sky = toneMapReinhard(sky);
+	sky = mix(sky, vec3(1.0, 1.0, 1.0), getStars(pos, time) * (1.0 - smoothstep(0.0, 0.3, daylight)) * (1.0 - rainLevel));
+	sky = mix(sky, moon.rgb, moon.a * smoothstep(0.1, 0.0, daylight));
+	sky = mix(sky, vec3(getLuma(sky), getLuma(sky), getLuma(sky)), rainLevel);
+
+	return sky;
+}
+
+vec3 brighten(const vec3 col) {
+    float rgbMax = max(col.r, max(col.g, col.b));
+    float delta  = 1.0 - rgbMax;
+
+    return col + delta;
+}
+
+vec3 getSkyLightCol(const vec3 pos, const vec3 sunPos, const vec3 skyCol, const vec3 vanillaSkyCol, const vec3 vanillaFogCol, const float daylight, const float rainLevel) {
+	vec3 sky = getAtmosphere(pos, sunPos, skyCol, vanillaSkyCol, vanillaFogCol, mix(0.5, 2.0, smoothstep(0.0, 0.1, daylight)));
+	sky = toneMapReinhard(sky);
+
+	sky = mix(sky, vec3(getLuma(sky), getLuma(sky), getLuma(sky)), rainLevel);
+
+	return sky;
+}
+
+vec3 getSunlightCol(const float daylight) {
+    const vec3 setCol = vec3(1.00, 0.36, 0.02);
+    const vec3 dayCol = vec3(1.00, 0.87, 0.80);
+
+    return mix(dayCol, setCol, min(smoothstep(0.0, 0.2, daylight), smoothstep(0.4, 0.2, daylight)));
+}
+
+vec3 getAmbientLightCol(const vec3 pos, const vec3 sunPos, const vec3 skyCol, const vec3 vanillaSkyCol, const vec3 vanillaFogCol, const float torchLevel, const float indoor, const float shadowLightLevel, const float daylight, const float rainLevel) {
+    vec3 dayCol     = mix(getSkyLightCol(pos, sunPos, skyCol, vanillaSkyCol, vanillaFogCol, daylight, rainLevel), getSunlightCol(daylight), 0.5);
+    vec3 nightCol   = moonlightCol;
+
+    vec3 outsideCol = mix(nightCol, dayCol, smoothstep(0.0, 0.2, daylight));
+    vec3 insideCol  = mix(vec3(0.0, 0.0, 0.0), torchlightCol, torchLevel);
+
+    vec3 result     = mix(insideCol, outsideCol, indoor * shadowLightLevel);
+
+    return brighten(result);
+}
+
+vec3 getAmbientLight(const vec3 pos, const vec3 sunPos, const vec3 skyCol, const vec3 vanillaSkyCol, const vec3 vanillaFogCol, const float torchLevel, const float indoor, const float shadowLightLevel, const float daylight, const float rainLevel) {
+    const float baseIntensity = 40.0;
+
+    vec3 col = getAmbientLightCol(pos, sunPos, skyCol, vanillaSkyCol, vanillaFogCol, torchLevel, indoor, shadowLightLevel, daylight, rainLevel);
+    float intensity = mix(0.01, mix(mix(0.05, 0.35, daylight), mix(0.05, 1.0, daylight), shadowLightLevel), indoor);
+
+    vec3 result = col * baseIntensity * intensity;
+
+    return result;
+}
+
+vec3 getTorchLight(const float torchLevel, const float indoor, const float shadowLightLevel, const float daylight) {
+    const float baseIntensity = 130.0;
+
+    float intensity = baseIntensity * torchLevel;
+
+    return torchlightCol * intensity;
+}
+
+vec3 getSunlight(const float indoor, const float shadowLightLevel, const float daylight, const float rainLevel) {
+    const float baseIntensity = 25.0;
+
+    float intensity = baseIntensity * mix(0.0, mix(1.0, 5.0, min(smoothstep(0.0, 0.2, daylight), smoothstep(0.4, 0.2, daylight))), daylight) * indoor * shadowLightLevel;
+    intensity = mix(intensity, RAIN_CUTOFF, rainLevel);
+
+    return getSunlightCol(daylight) * intensity;
+}
+
+vec3 getSkyLight(const vec3 pos, const vec3 sunPos, const vec3 skyCol, const vec3 vanillaSkyCol, const vec3 vanillaFogCol, const float rainLevel, const float indoor, const float shadowLightLevel, const float daylight) {
+    const float baseIntensity = 10.0;
+
+    float intensity = baseIntensity * daylight * indoor * shadowLightLevel;
+    intensity = mix(intensity, RAIN_CUTOFF, rainLevel);
+    
+    return getSkyLightCol(pos, sunPos, skyCol, vanillaSkyCol, vanillaFogCol, daylight, rainLevel) * intensity;
+}
+
+vec3 getMoonlight(const float indoor, const float shadowLightLevel, const float daylight, const float rainLevel) {
+    const float baseIntensity = 20.0;
+
+    float intensity = baseIntensity * (1.0 - mix(0.0, 0.2, daylight)) * indoor * shadowLightLevel;
+    intensity = mix(intensity, RAIN_CUTOFF, rainLevel);
+
+    return moonlightCol * intensity;
+}
+
+vec3 fresnelSchlick(const vec3 H, const vec3 N, const vec3 F0) {
+	float cosTheta = clamp(1.0 - max(0.0, dot(H, N)), 0.0, 1.0);
+
+    return F0 + (1.0 - F0) * cosTheta * cosTheta * cosTheta * cosTheta * cosTheta;
+}
+
+float fresnelSchlick(const vec3 H, const vec3 N, const float F0) {
+    float cosTheta = clamp(1.0 - max(0.0, dot(H, N)), 0.0, 1.0);
+
+    return F0 + (1.0 - F0) * cosTheta * cosTheta * cosTheta * cosTheta * cosTheta;
+}
+
+// https://www.unrealengine.com/en-US/blog/physically-based-shading-on-mobile
+vec3 getEnvironmentBRDF(const vec3 H, const vec3 N, const float R, const vec3 F0) {
+	const vec4 c0 = vec4(-1.0, -0.0275, -0.572,  0.022);
+	const vec4 c1 = vec4( 1.0,  0.0425,  1.040, -0.040);
+
+	vec4 r = R * c0 + c1;
+	float a004 = min(r.x * r.x, exp2(-9.28 * max(0.0, dot(H, N)))) * r.x + r.y;
+	vec2 AB = vec2(-1.04, 1.04) * a004 + r.zw;
+
+	return F0 * AB.x + AB.y;
+}
+
+vec3 getPBRSpecular(const vec3 N, const vec3 V, const vec3 L, const float R, const float F0) {
+	vec3  H = normalize(V + L);
+    float D = (R * R)
+			/ (3.14159265359 * (max(0.0, dot(H, N)) * max(0.0, dot(H, N)) * (R * R - 1.0) + 1.0) * (max(0.0, dot(H, N)) * max(0.0, dot(H, N)) * (R * R - 1.0) + 1.0));
+    float G = ((max(0.0, dot(V, N))) / (max(0.0, dot(V, N)) + ((R + 1.0) * (R + 1.0)) * 0.125))
+			* ((max(0.0, dot(L, N))) / (max(0.0, dot(L, N)) + ((R + 1.0) * (R + 1.0)) * 0.125));
+    vec3  F = fresnelSchlick(H, V, vec3(F0, F0, F0));
+
+	return clamp((D * G * F) / max(0.001, 4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0)), 0.0, 1.0);
+}
+
+vec3 getTotalLight(const vec4 albedo, const vec4 shadows, const vec3 skyCol, const vec3 vanillaSkyCol, const vec3 vanillaFogCol,
+                   const vec3 relPos, const vec3 shadowLightPos, const vec3 normal,
+                   const float torchLevel, const float indoor, const float shadowLightLevel, const float daylight, const float rainLevel,
+                   const float shaderAO, const float vanillaAO, const float R, const float F0) {
+    vec3 result = vec3(0.0, 0.0, 0.0);
+	
+	vec3 totalLight = vec3(0.0, 0.0, 0.0);
+	vec3 dirLight   = vec3(0.0, 0.0, 0.0);
+	vec3 undirLight = vec3(0.0, 0.0, 0.0);
+
+    float totalAO = clamp(vanillaAO * 1.5 + shaderAO * 1.0, 0.0, 1.0);
+
+    undirLight += getAmbientLight(normalize(relPos), shadowLightPos, skyCol, vanillaSkyCol, vanillaFogCol, torchLevel, indoor, shadowLightLevel, daylight, 1.0) * (1.0 - totalAO);
+	undirLight += getTorchLight(torchLevel, indoor, shadowLightLevel, daylight) * (1.0 - totalAO);
+	dirLight   += getSunlight(indoor, shadowLightLevel, daylight, rainLevel) * (1.0 - totalAO);
+	dirLight   += getMoonlight(indoor, shadowLightLevel, daylight, rainLevel) * (1.0 - totalAO);
+	undirLight += getSkyLight(normalize(relPos), shadowLightPos, skyCol, vanillaSkyCol, vanillaFogCol, rainLevel, indoor, shadowLightLevel, daylight) * (1.0 - totalAO);
+
+	totalLight = dirLight + undirLight;
+	
+    result = albedo.rgb * totalLight;
+
+    vec3 incomingLight = (dirLight + undirLight) * 0.03;
+    vec3 dirLightRatio = dirLight / max(vec3(0.001, 0.001, 0.001), incomingLight);
+
+	vec3 specular = getPBRSpecular(normal, normalize(-relPos), shadowLightPos, R, F0);
+	vec3 fresnel  = fresnelSchlick(normalize(-relPos), shadowLightPos, vec3(F0, F0, F0));
+
+	vec3 reflectedLight = (specular * dirLightRatio) * 5.0 * mix(0.005, 1.0, smoothstep(0.0, 0.1, daylight)); // Reflected directional light
+	reflectedLight 	   += (fresnel * incomingLight)  * 0.3; // Reflected undirectional light
+	result += reflectedLight;
+
+    return result;
+}
+
+/* 
+** ACES filmic tone mapping
+** https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/
+*/
+vec3 acesFilmicToneMap(const vec3 col) {
+    const float a = 2.51;
+    const float b = 0.03;
+    const float c = 2.43;
+    const float d = 0.59;
+    const float e = 0.14;
+
+    return clamp((col * (a * col + b)) / (col * (c * col + d) + e), 0.0, 1.0);
+}
+
+vec3 contrastFilter(const vec3 col, const float contrast) {
+    return (col - 0.5) * max(contrast, 0.0) + 0.5;
+}
+
+/* 
+** Uncharted 2 tone mapping
+** See: http://filmicworlds.com/blog/filmic-tonemapping-operators/
+*/
+vec3 uncharted2ToneMapFilter(const vec3 col) {
+    const float A = 0.015; // Shoulder strength
+    const float B = 0.500; // Linear strength
+    const float C = 0.100; // Linear angle
+    const float D = 0.010; // Toe strength
+    const float E = 0.020; // Toe numerator
+    const float F = 0.300; // Toe denominator
+
+    return ((col * (A * col + C * B) + D * E) / (col * (A * col + B) + D * F)) - E / F;
+}
+vec3 uncharted2ToneMap(const vec3 col) {
+    const float W = 127.0;
+
+    vec3 curr = uncharted2ToneMapFilter(col);
+    vec3 whiteScale = 1.0 / uncharted2ToneMapFilter(vec3(W, W, W));
+    vec3 color = curr * whiteScale;
+
+    return color;
+}
+
+#define GAMMA 2.2 // [1.8 2.0 2.1 2.2 2.4 2.6 2.8]
 
 void main() {
 vec4 albedo = vec4(0.0, 0.0, 0.0, 0.0);
@@ -436,17 +574,17 @@ vec4 texCol = vec4(0.0, 0.0, 0.0, 0.0);
     albedo = texture2D(s_MatTexture, v_texcoord0);
     texCol = albedo;
 
-    #if defined(ALPHA_TEST) || defined(DEPTH_ONLY)
+#   if defined(ALPHA_TEST) || defined(DEPTH_ONLY)
         if (albedo.a < 0.5) {
             discard;
             return;
         }
-    #endif
+#   endif
 
-    #if defined(SEASONS) && (defined(OPAQUE) || defined(ALPHA_TEST))
+#   if defined(SEASONS) && (defined(OPAQUE) || defined(ALPHA_TEST))
         albedo.rgb *= mix(vec3(1.0, 1.0, 1.0), texture2D(s_SeasonsTexture, v_color0.xy).rgb * 2.0, v_color0.b);
         albedo.rgb *= v_color0.aaa;
-    #else
+#   else
         if (abs(v_color0.r - v_color0.g) > 0.001 || abs(v_color0.g - v_color0.b) > 0.001) {
             albedo.rgb *= normalize(v_color0.rgb);
         }
@@ -457,86 +595,92 @@ vec4 texCol = vec4(0.0, 0.0, 0.0, 0.0);
     albedo.a = 1.0;
 #endif
 
-bool isMetallic = false;
+vec3 fNormal = normalize(cross(dFdx(fragPos), dFdy(fragPos)));
+
+float roughness = 0.8;
+float reflectance = 0.02;
+
+if (waterFlag > 0.5) {
+    albedo = vec4(0.0, 0.02, 0.03, mix(0.1, 1.0, 1.0 - abs(dot(normalize(relPos), fNormal))));
+    roughness = 0.01;
+    reflectance = 0.99;
+    fNormal = mul(getWaterWaveNormal(fragPos.xz, frameTime), getTBNMatrix(normalize(cross(dFdx(fragPos), dFdy(fragPos)))));
+} else {
+    fNormal = mul(getTexNormal(v_texcoord0, 1024.0, 0.0004), getTBNMatrix(fNormal));
+}
+
 #if !defined(ALPHA_TEST) && !defined(TRANSPARENT)
-	if ((0.95 < texCol.a && texCol.a < 1.0) && v_color0.b == v_color0.g && v_color0.r == v_color0.g) {
-		isMetallic = true;
-	}
+	if ((0.95 < texCol.a && texCol.a < 1.0) && v_color0.r == v_color0.g && v_color0.g == v_color0.b) {
+        if (getBlockID(texCol) == 0) { // Iron
+            roughness = 0.09;
+            reflectance = 0.92;
+            fNormal = mul(getTexNormal(v_texcoord0, 8192.0, 0.0006), getTBNMatrix(fNormal));
+        } else if (getBlockID(texCol) == 1) { // Gold
+            roughness = 0.12;
+            reflectance = 0.85;
+            fNormal = mul(getTexNormal(v_texcoord0, 4096.0, 0.0005), getTBNMatrix(fNormal));
+        } else if (getBlockID(texCol) == 2) { // Copper
+            roughness = 0.24;
+            reflectance = 0.7;
+            fNormal = mul(getTexNormal(v_texcoord0, 2048.0, 0.0005), getTBNMatrix(fNormal));
+        } else if (getBlockID(texCol) == 3) { // Others
+            roughness = 0.37;
+            reflectance = 0.2;
+            fNormal = mul(getTexNormal(v_texcoord0, 4096.0, 0.0005), getTBNMatrix(fNormal));
+        }
+    }
 #endif
 
-vec3 skyPos = normalize(relPos);
-vec3 sunPos = vec3(-0.4, 1.0, 0.65);
-float time = min(getTimeFromFog(v_fog), 0.7);
-vec3 sunMoonPos = (time > 0.0 ? 1.0 : -1.0) * sunPos * vec3(cos(time), sin(time), -cos(time));
-vec3 normal = normalize(cross(dFdx(fragPos), dFdy(fragPos)));
-if (isMetallic) {
-	normal = mul(getTexNormal(v_texcoord0, 4096.0, 0.0012), getTBNMatrix(normal));
-	normal = mul(getTexNormal(v_texcoord0, 8192.0, 0.0008), getTBNMatrix(normal));
-}
-float outdoor = smoothstep(0.92, 0.94, v_lightmapUV.y);
-float diffuse = max(0.0, dot(sunMoonPos, normal));
-float daylight = max(0.0, time);
-float duskDawn = min(smoothstep(0.0, 0.3, daylight), smoothstep(0.5, 0.3, daylight));
-float amnientLightFactor = mix(0.2, mix(0.2, 1.4, daylight), v_lightmapUV.y);;
-float dirLightFactor = mix(0.0, diffuse, outdoor);
-float emissiveLightFactor = v_lightmapUV.x * v_lightmapUV.x * v_lightmapUV.x * v_lightmapUV.x * v_lightmapUV.x;
-float clearWeather = 1.0 - mix(0.0, mix(smoothstep(0.5, 0.3, fogControl.x), 0.0, step(fogControl.x, 0.0)), smoothstep(0.0, 0.94, v_lightmapUV.y));
-vec3 skylightCol = getSkyLight(reflect(skyPos, normal), sunMoonPos, SKY_COL, daylight, 1.0 - clearWeather);
-vec3 sunlightCol = mix(SUNLIGHT_COL, SUNLIGHT_COL_SET, duskDawn);
-vec3 daylightCol = mix(skylightCol, sunlightCol, 0.4);
-vec3 ambientLightCol = mix(mix(vec3(0.0, 0.0, 0.0), TORCHLIGHT_COL, emissiveLightFactor), mix(MOONLIGHT_COL, daylightCol, daylight), dirLightFactor);
-ambientLightCol += 1.0 - max(max(ambientLightCol.r, ambientLightCol.g), ambientLightCol.b);
 float vanillaAO = 0.0;
 #ifndef SEASONS
-	vanillaAO = 1.0 - (v_color0.g * 2.0 - (v_color0.r < v_color0.b ? v_color0.r : v_color0.b)) * 1.4;
+	vanillaAO = 1.0 - (v_color0.g * 2.0 - (v_color0.r < v_color0.b ? v_color0.r : v_color0.b));
 #endif
-float occlShadow = mix(1.0, 0.2, vanillaAO);
+float time = getTimeFromFog(v_fog);
+vec3 shadowLightPos = vec3(-0.4, 0.8, 1.0) * vec3(cos(time), sin(time), -cos(time));
+float daylight = max(0.0, sin(time) * 0.8);
+float rainLevel = mix(0.0, mix(smoothstep(0.5, 0.3, fogControl.x), 0.0, step(fogControl.x, 0.0)), smoothstep(0.0, 0.94, v_lightmapUV.y));
+float diffuse = max(0.0, dot((time > 0.0 ? 1.0 : -1.0) * shadowLightPos, fNormal));
+vec4 shadows = vec4(0.0, 0.0, 0.0, 0.0);
+shadows.a = smoothstep(0.94, 0.92, v_lightmapUV.y);
+float indoor = mix(0.0, 1.0, v_lightmapUV.y);
+float torchLevel = v_lightmapUV.x * v_lightmapUV.x * v_lightmapUV.x * v_lightmapUV.x * v_lightmapUV.x;
+float shadowLightLevel = mix(0.0, mix(0.0, 1.0 - shadows.a, diffuse), v_lightmapUV.y);
+shadows.a = mix(1.0, shadows.a, diffuse);
+vanillaAO *= vanillaAO * vanillaAO;
 
-vec3 light = vec3(0.0, 0.0, 0.0);
+if (bool(v_lightmapUV.y)) {
+    vec3 reflection = getSky(reflect(normalize(relPos), fNormal), shadowLightPos, vec3(0.4, 0.65, 1.0), vec3(0.0, 0.0, 0.0), vec3(0.0, 0.0, 0.0), daylight, rainLevel, frameTime, 0);
 
-light += ambientLightCol * AMBIENT_LIGHT_INTENSITY * amnientLightFactor * occlShadow;
-light += sunlightCol * SUNLIGHT_INTENSITY * dirLightFactor * daylight * clearWeather;
-light += MOONLIGHT_COL * MOONLIGHT_INTENSITY * dirLightFactor * (1.0 - daylight) * clearWeather;
-light += skylightCol * SKYLIGHT_INTENSITY * dirLightFactor * daylight * clearWeather;
-light += TORCHLIGHT_COL * TORCHLIGHT_INTENSITY * emissiveLightFactor;
+    if (waterFlag > 0.5) {
+        albedo.rgb = mix(albedo.rgb, reflection, fresnelSchlick(normalize(-relPos), fNormal, 0.4) * v_lightmapUV.y);
+    }
 
-albedo.rgb = pow(albedo.rgb, vec3(GAMMA, GAMMA, GAMMA));
-albedo.rgb *= light;
-albedo.rgb = hdrExposure(albedo.rgb, EXPOSURE_BIAS, 0.2);
-albedo.rgb = uncharted2ToneMap(albedo.rgb, EXPOSURE_BIAS);
-albedo.rgb = pow(albedo.rgb, vec3(1.0 / GAMMA, 1.0 / GAMMA, 1.0 / GAMMA));
-albedo.rgb = contrastFilter(albedo.rgb, GAMMA - 0.6);
-
-if (waterFlag > 0.5 || isMetallic) {
-	if (waterFlag > 0.5) {
-		normal = mul(getWaterWavNormal(fragPos.xz, frameTime), getTBNMatrix(normalize(cross(dFdx(fragPos), dFdy(fragPos)))));
-	}
-
-	float cosTheta = 1.0 - abs(dot(normalize(relPos), normal));
-	vec3 sky = getSky(reflect(skyPos, normal), sunMoonPos, sunMoonPos, SKY_COL, daylight, 1.0 - clearWeather, frameTime, 7);
-
-	if (waterFlag > 0.5) {
-		albedo.rgb = mix(albedo.rgb, v_color0.rgb, outdoor) * 0.5;
-		albedo.a = mix(0.2, 1.0, cosTheta);
-	}
-	
-	albedo.rgb = mix(albedo.rgb, sky, cosTheta * outdoor);
-
-	float specularLight = getSun(cross(reflect(skyPos, normal), sunMoonPos) * 45.0);
-	albedo += specularLight * outdoor;
+    #if !defined(ALPHA_TEST) && !defined(TRANSPARENT)
+        if ((0.95 < texCol.a && texCol.a < 1.0) && v_color0.r == v_color0.g && v_color0.g == v_color0.b) {
+            albedo.rgb = mix(albedo.rgb, reflection * getEnvironmentBRDF(normalize(-relPos), fNormal, roughness, mix(vec3(0.04, 0.04, 0.04), albedo.rgb, reflectance)), reflectance * v_lightmapUV.y);
+        }
+    #endif
 }
 
-float fogBrightness = mix(0.7, 2.0, smoothstep(0.0, 0.1, daylight));
-vec3 fogCol = toneMapReinhard(getAtmosphere(skyPos, sunMoonPos, SKY_COL, fogBrightness)) * mix(vec3(1.0, 1.0, 1.0), v_fog.rgb, step(fogControl.x, 0.0));
+albedo.rgb = pow(albedo.rgb, vec3(GAMMA, GAMMA, GAMMA));
 
-albedo.rgb = mix(albedo.rgb, mix(fogCol, vec3(dot(fogCol, vec3(0.4, 0.4, 0.4)), dot(fogCol, vec3(0.4, 0.4, 0.4)), dot(fogCol, vec3(0.4, 0.4, 0.4))), 1.0 - clearWeather), v_fog.a);
+vec3 totalLight = getTotalLight(albedo, shadows, vec3(0.4, 0.65, 1.0), vec3(0.0, 0.0, 0.0), vec3(0.0, 0.0, 0.0),
+                  relPos, shadowLightPos, fNormal,
+                  torchLevel, indoor, shadowLightLevel, daylight, rainLevel,
+                  0.0, vanillaAO, roughness, reflectance);
 
-#if !defined(TRANSPARENT)
-	if (!isMetallic) {
-		float sunRayFactor = !bool(step(fogControl.x, 0.0)) ? min(smoothstep(0.5, 0.94, v_lightmapUV.y) * max(0.0, 1.0 - distance(skyPos, sunMoonPos)) * smoothstep(0.0, 0.1, daylight), 1.0) * clearWeather : 0.0;
-		albedo.rgb = mix(albedo.rgb, RAY_COL, sunRayFactor);
-	}
-#endif
+albedo.rgb = totalLight;
+albedo.rgb = uncharted2ToneMap(albedo.rgb);
+albedo.rgb = pow(albedo.rgb, vec3(1.0 / GAMMA, 1.0 / GAMMA, 1.0 / GAMMA));
+albedo.rgb = contrastFilter(albedo.rgb, 1.85);
+
+if (waterFlag > 0.5) {
+    albedo.a += getPBRSpecular(fNormal, normalize(-relPos), shadowLightPos, roughness, reflectance).r * 5.0 * shadowLightLevel * (1.0 - rainLevel);
+}
+
+vec3 fogCol = getSkyLightCol(normalize(relPos), shadowLightPos, vec3(0.4, 0.65, 1.0), vec3(0.0, 0.0, 0.0), vec3(0.0, 0.0, 0.0), daylight, rainLevel);
+float sunRayFactor = !bool(step(fogControl.x, 0.0)) ? smoothstep(0.5, 0.94, v_lightmapUV.y) * min(max(0.0, 1.0 - distance(normalize(relPos), shadowLightPos)) * smoothstep(0.0, 0.1, daylight), 1.0) * (1.0 - rainLevel) : 0.0;
+albedo.rgb = mix(albedo.rgb, !bool(step(fogControl.x, 0.0)) ? mix(v_fog.rgb, fogCol, v_lightmapUV.y) : v_fog.rgb, min(mix(v_fog.a, v_fog.a * 0.5, rainLevel) + sunRayFactor * 0.5, 1.0));
 
     gl_FragColor = albedo;
 }
