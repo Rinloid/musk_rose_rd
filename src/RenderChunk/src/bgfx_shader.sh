@@ -671,15 +671,35 @@ mat3 mtxFromCols(vec3 _0, vec3 _1, vec3 _2)
 	return transpose(mat3(_0, _1, _2) );
 #endif // BGFX_SHADER_LANGUAGE_GLSL
 }
+mat2 mtxFromRows(vec2 _0, vec2 _1)
+{
+#if BGFX_SHADER_LANGUAGE_GLSL
+	return transpose(mat2(_0, _1) );
+#else
+	return mat2(_0, _1);
+#endif // BGFX_SHADER_LANGUAGE_GLSL
+}
+mat2 mtxFromCols(vec2 _0, vec2 _1)
+{
+#if BGFX_SHADER_LANGUAGE_GLSL
+	return mat2(_0, _1);
+#else
+	return transpose(mat2(_0, _1) );
+#endif // BGFX_SHADER_LANGUAGE_GLSL
+}
 
 #if BGFX_SHADER_LANGUAGE_GLSL
+#define mtxFromRows2(_0, _1)         transpose(mat2(_0, _1) )
 #define mtxFromRows3(_0, _1, _2)     transpose(mat3(_0, _1, _2) )
 #define mtxFromRows4(_0, _1, _2, _3) transpose(mat4(_0, _1, _2, _3) )
+#define mtxFromCols2(_0, _1)                   mat2(_0, _1)
 #define mtxFromCols3(_0, _1, _2)               mat3(_0, _1, _2)
 #define mtxFromCols4(_0, _1, _2, _3)           mat4(_0, _1, _2, _3)
 #else
+#define mtxFromRows2(_0, _1)                   mat2(_0, _1)
 #define mtxFromRows3(_0, _1, _2)               mat3(_0, _1, _2)
 #define mtxFromRows4(_0, _1, _2, _3)           mat4(_0, _1, _2, _3)
+#define mtxFromCols2(_0, _1)         transpose(mat2(_0, _1) )
 #define mtxFromCols3(_0, _1, _2)     transpose(mat3(_0, _1, _2) )
 #define mtxFromCols4(_0, _1, _2, _3) transpose(mat4(_0, _1, _2, _3) )
 #endif // BGFX_SHADER_LANGUAGE_GLSL
@@ -697,6 +717,8 @@ uniform mat4  u_modelView;
 uniform mat4  u_modelViewProj;
 uniform vec4  u_alphaRef4;
 #define u_alphaRef u_alphaRef4.x
+uniform vec4  u_prevWorldPosOffset;
+uniform mat4  u_prevViewProj;
 
 #endif // __cplusplus
 

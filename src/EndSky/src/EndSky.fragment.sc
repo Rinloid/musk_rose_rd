@@ -43,7 +43,7 @@ float getBlockyClouds(const vec2 pos, const float frameTime, const float rainLev
     return body;
 }
 
-vec2 getClouds(const vec3 pos, const vec3 sunPos, const vec2 screenPos, const float frameTime, const float rainLevel) {
+vec2 getClouds(const vec3 pos, const vec3 sunPos, const float frameTime, const float rainLevel) {
     const int cloudSteps = 32;
     const float cloudStepSize = 0.006;
     const int raySteps = 16;
@@ -67,7 +67,7 @@ vec2 getClouds(const vec3 pos, const vec3 sunPos, const vec2 screenPos, const fl
                 vec3 rayPos = pos.xyz / pos.y * height;
                 float ray = 0.0;
                 for (int j = 0; j < raySteps; j++) {
-                    ray += getBlockyClouds(rayPos.xz * 4.0 * mix(1.1, 1.0, bayerX64(screenPos) * 0.5 + 0.5), frameTime, rainLevel) * 0.6;
+                    ray += getBlockyClouds(rayPos.xz * 4.0, frameTime, rainLevel) * 0.6;
                     rayPos += sunPos * rayStepSize;
                 } ray /= float(raySteps);
                 shade += ray;
@@ -82,10 +82,10 @@ vec2 getClouds(const vec3 pos, const vec3 sunPos, const vec2 screenPos, const fl
     return vec2(clouds, shade);
 }
 
-#define EARTH_RADIUS 637200.0
-#define ATMOSPHERE_RADIUS 647200.0
+#define EARTH_RADIUS 6372000.0
+#define ATMOSPHERE_RADIUS 6472000.0
 #define RAYLEIGH_SCATTERING_COEFFICIENT vec3(0.000055, 0.00013, 0.000224)
-#define MIE_SCATTERING_COEFFICIENT vec3(0.00004, 0.00004, 0.00004)
+#define MIE_SCATTERING_COEFFICIENT vec3(0.00002, 0.00002, 0.00002)
 #define RAYLEIGH_SCALE_HEIGHT 8000.0
 #define MIE_SCALE_HEIGHT 1200.0
 #define MIE_DIRECTION 0.75
@@ -99,23 +99,22 @@ vec3 tonemapReinhard(const vec3 col) {
 }
 
 vec2 getRaySphereIntersection(const vec3 rayDir, const vec3 rayOrig, const float raySphere) {
-    float a = dot(rayDir, rayDir);
-    float b = 2.0 * dot(rayDir, rayOrig);
-    float c = dot(rayOrig, rayOrig) - (raySphere * raySphere);
-    float d = (b * b) - 4.0 * a * c;
-    if (d < 0.0) {
-        return vec2(10000.0, -10000.0);
-    } else {
-        return vec2((-b - sqrt(d)) / (2.0 * a), (-b + sqrt(d)) / (2.0 * a));
-    }
+    float PoD = dot(rayOrig, rayDir);
+    float raySphereSquared = raySphere * raySphere;
+
+    float delta = PoD * PoD + raySphereSquared - dot(rayOrig, rayOrig);
+    if (delta < 0.0) return vec2(-1.0, -1.0);
+    delta = sqrt(delta);
+
+    return -PoD + vec2(-delta, delta);
 }
 
-vec3 getAtmosphere(const vec3 pos, const vec3 sunPos, const vec2 screenPos, const float frameTime, const float rainLevel, const float intensity) {
+vec3 getAtmosphere(const vec3 pos, const vec3 sunPos, const float frameTime, const float rainLevel, const float intensity) {
     const int numSteps = 32;
 
     vec3 totalSky = vec3(0.0, 0.0, 0.0);
 
-    vec3 rayOrig = vec3(0.0, EARTH_RADIUS, 0.0);
+    vec3 rayOrig = vec3(0.0, EARTH_RADIUS + (ATMOSPHERE_RADIUS - EARTH_RADIUS) * 0.3, 0.0);
 
     vec2 p = getRaySphereIntersection(pos, rayOrig, ATMOSPHERE_RADIUS);
     p.y = min(p.y, getRaySphereIntersection(pos, rayOrig, EARTH_RADIUS).x);
@@ -146,8 +145,8 @@ vec3 getAtmosphere(const vec3 pos, const vec3 sunPos, const vec2 screenPos, cons
     }
     totalSky = intensity * (rayleighPhase * RAYLEIGH_SCATTERING_COEFFICIENT * totalRayleigh + miePhase * MIE_SCATTERING_COEFFICIENT * totalMie);
 
-    vec2 clouds = getClouds(pos, sunPos, screenPos, frameTime, rainLevel);
-    totalSky = intensity * 50.0 * miePhase * MIE_SCATTERING_COEFFICIENT * totalMie * clouds.x * exp(-clouds.y * 5.0) + totalSky * exp(-clouds.x);
+//    vec2 clouds = getClouds(pos, sunPos, frameTime, rainLevel);
+//    totalSky = intensity * 25.0 * miePhase * MIE_SCATTERING_COEFFICIENT * totalMie * clouds.x * exp(-clouds.y * 5.0) + totalSky * exp(-clouds.x);
 
     return tonemapReinhard(totalSky);
 }
@@ -170,13 +169,15 @@ float getStars(const vec3 pos, const float time) {
 vec3 getSky(const vec3 pos, const vec3 sunPos, const vec3 moonPos, const vec3 shadowLightPos, const vec2 screenPos, const float daylight, const float frameTime, const float rainLevel) {
     vec3 totalSky = vec3(0.0, 0.0, 0.0);
 
-    totalSky = getAtmosphere(pos, shadowLightPos, screenPos, frameTime, rainLevel, mix(2.0, 20.0, daylight));
+    totalSky = getAtmosphere(pos, shadowLightPos, frameTime, rainLevel, mix(2.0, 20.0, daylight));
     totalSky = mix(totalSky, vec3(getLuma(totalSky), getLuma(totalSky), getLuma(totalSky)), rainLevel);
     totalSky *= mix(0.65, 1.0, bayerX64(screenPos) * 0.5 + 0.5);
 
-    totalSky = mix(totalSky, vec3(1.0, 1.0, 1.0), getStars(pos, frameTime) * (1.0 - daylight) * (1.0 - rainLevel));
-    totalSky = mix(totalSky, vec3(1.0, 1.0, 1.0), getSun(pos, sunPos) * (1.0 - rainLevel));
-    totalSky = mix(totalSky, vec3(1.0, 0.95, 0.81), getMoon(pos, moonPos) * (1.0 - rainLevel));
+    float drawSpace = max(0.0, length(pos.xz / (pos.y * float(16))));
+    if (drawSpace < 1.0 && !bool(step(pos.y, 0.0))) {
+        totalSky = mix(totalSky, vec3(1.0, 1.0, 1.0), getStars(pos, frameTime) * (1.0 - drawSpace));
+    }
+    totalSky = mix(totalSky, vec3(1.0, 1.0, 1.0), getSun(pos, sunPos));
 
     return totalSky;
 }
@@ -190,13 +191,13 @@ float getTime(const vec4 fogCol) {
 void main() {
 vec4 albedo = vec4(0.0, 0.0, 0.0, 1.0);
 
-float time = getTime(v_fog);
+float time = 1.0;
 vec3 sunPos = normalize(vec3(cos(time), sin(time), 0.2));
 vec3 moonPos = -sunPos;
 vec3 shadowLightPos = time > 0.0 ? sunPos : moonPos;
 vec2 screenPos = gl_FragCoord.xy;
 float daylight = max(0.0, time);
-float rainLevel = mix(smoothstep(0.5, 0.3, fogControl.x), 0.0, step(fogControl.x, 0.0));
+float rainLevel = 0.0;
 
 albedo.rgb = getSky(normalize(relPos), sunPos, moonPos, shadowLightPos, screenPos, daylight, frameTime, rainLevel);
 

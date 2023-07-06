@@ -12,8 +12,7 @@ void main() {
 relPos = a_position;
 
 /* Cubemap position fix */
-relPos.y -= 0.205;
-relPos.yz *= -1.0;
+relPos *= -1.0;
 
 v_fog = FogColor;
 frameTime = ViewPositionAndTime.w;
