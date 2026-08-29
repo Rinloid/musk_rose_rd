@@ -68,5 +68,7 @@ void main() {
         if (a_color0.r != a_color0.g || a_color0.g != a_color0.b || a_color0.r != a_color0.b) waterFlag = 1.0;
     #endif
 
+    v_texcoord0 = uv0;
+
     gl_Position = mul(u_viewProj, vec4(relPos, 1.0));
 }
